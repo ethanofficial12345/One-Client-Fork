@@ -1,0 +1,12 @@
+/target
+.DS_Store
+/.idea
+OneLauncher.iml
+
+/packages/oneclient_app/icons/generated/
+
+# local signing config (machine-specific, not for upstream)
+.signpath/
+
+# local dev database url (never committed)
+packages/oneclient_db/.env
