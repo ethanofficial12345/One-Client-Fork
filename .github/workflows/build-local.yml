@@ -1,0 +1,215 @@
+name: Local Build (Offline Accounts)
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Target platform to build for'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - windows
+          - linux
+          - macos-arm64
+          - macos-x64
+      verbose:
+        description: 'Enable verbose logging (cargo packager --verbose)'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: build-local-${{ github.ref }}-${{ github.event.inputs.platform || 'all' }}
+  cancel-in-progress: true
+
+env:
+  CARGO_PROFILE_RELEASE_LTO: thin
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+  # sqlx offline query cache — no DATABASE_URL needed
+  SQLX_OFFLINE: 'true'
+
+jobs:
+  build:
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            target: ''
+            os_key: windows
+            arch: x86_64
+            formats: nsis
+            runner_os: Windows
+          - platform: ubuntu-22.04
+            target: ''
+            os_key: linux
+            arch: x86_64
+            formats: deb,appimage
+            runner_os: Linux
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            os_key: darwin
+            arch: aarch64
+            formats: app,dmg
+            runner_os: macOS
+          - platform: macos-latest
+            target: x86_64-apple-darwin
+            os_key: darwin
+            arch: x86_64
+            formats: app,dmg
+            macos_deployment_target: '10.14'
+            runner_os: macOS
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Filter by input platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          PLATFORM="${{ github.event.inputs.platform }}"
+          if [ "$PLATFORM" != "all" ]; then
+            case "$PLATFORM" in
+              windows) [ "${{ matrix.runner_os }}" = "Windows" ] ;;
+              linux)   [ "${{ matrix.runner_os }}" = "Linux" ] ;;
+              macos-arm64) [ "${{ matrix.arch }}" = "aarch64" ] ;;
+              macos-x64)   [ "${{ matrix.arch }}" = "x86_64" ] ;;
+              *)       false ;;
+            esac || exit 0
+          fi
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          target: ${{ matrix.target }}
+          save-cache: true
+          restore-cache: true
+          cache-namespace: build-local-cache
+
+      - name: (Linux) Install system dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake pkg-config clang python3 \
+            libfontconfig-dev libfreetype-dev \
+            libgl1-mesa-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libdbus-1-dev \
+            libgtk-3-dev libayatana-appindicator3-dev \
+            libfuse2
+
+      - name: Install cargo-packager
+        uses: ./.github/actions/install-cargo-tool
+        with:
+          tool: cargo-packager
+          version: 0.11.8
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.target }}" ]; then
+            cargo build --release --bin oneclient_app --target ${{ matrix.target }}
+          else
+            cargo build --release --bin oneclient_app
+          fi
+
+      - name: (macOS) Compile app icon catalog
+        if: startsWith(matrix.platform, 'macos')
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="packages/oneclient_app/icons/generated"
+          mkdir -p "$out"
+          xcrun actool packages/oneclient_app/icons/OneClient.icon \
+            --compile "$out" \
+            --app-icon OneClient \
+            --output-partial-info-plist "$out/partial.plist" \
+            --platform macosx \
+            --minimum-deployment-target 26.0 \
+            --errors --warnings --notices
+          rm -f "$out/OneClient.icns"
+          test -f "$out/Assets.car" || { echo "::error::actool produced no Assets.car"; exit 1; }
+
+      - name: (Windows) Stage app-local VC++ runtime
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        run: python3 distribution/windows/bundle-crt.py
+
+      - name: Package (unsigned)
+        shell: bash
+        env:
+          CI: 'true'
+        run: |
+          ARGS="--release --formats ${{ matrix.formats }}"
+          if [ -n "${{ matrix.target }}" ]; then
+            ARGS="$ARGS --target ${{ matrix.target }}"
+          fi
+          VERBOSE="${{ github.event.inputs.verbose }}"
+          if [ "$VERBOSE" = "true" ]; then
+            ARGS="$ARGS --verbose"
+          fi
+          cargo packager $ARGS
+
+      - name: Resolve packager output dir
+        id: outdir
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.target }}" ]; then
+            echo "dir=target/${{ matrix.target }}/release" >> "$GITHUB_OUTPUT"
+          else
+            echo "dir=target/release" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: (Linux) Build RPM
+        if: matrix.platform == 'ubuntu-22.04'
+        uses: ./.github/actions/install-cargo-tool
+        with:
+          tool: cargo-generate-rpm
+          version: 0.21.0
+        shell: bash
+
+      - name: (Linux) Build RPM artifact
+        if: matrix.platform == 'ubuntu-22.04'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp target/release/.cargo-packager/deb/*/data/usr/share/applications/oneclient_app.desktop \
+             target/release/oneclient_app.desktop
+          cargo generate-rpm -p packages/oneclient_app
+          cp target/generate-rpm/*.rpm "${{ steps.outdir.outputs.dir }}/"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@b4b15b8c7c6f2b116be8ecae6266530fa644de6c # v4
+        with:
+          name: oneclient-build-local-${{ matrix.os_key }}-${{ matrix.arch }}
+          path: |
+            ${{ steps.outdir.outputs.dir }}/oneclient_app*
+            ${{ steps.outdir.outputs.dir }}/OneClient_*.exe
+            ${{ steps.outdir.outputs.dir }}/*.appimage
+            ${{ steps.outdir.outputs.dir }}/*.deb
+            ${{ steps.outdir.outputs.dir }}/*.rpm
+            ${{ steps.outdir.outputs.dir }}/*.dmg
+            ${{ steps.outdir.outputs.dir }}/*.AppData/*
+            !${{ steps.outdir.outputs.dir }}/**/.gitattributes
+            !${{ steps.outdir.outputs.dir }}/**/.github
+          retention-days: 14
+
+  report:
+    runs-on: ubuntu-latest
+    needs: build
+    if: always()
+    steps:
+      - name: Check job status
+        run: |
+          for job in ${{ toJSON(needs.*.result) }}; do
+            case "$job" in
+              success|skipped) ;;
+              *) echo "::error::Build failed for job $job"; exit 1 ;;
+            esac
+          done
+          echo "All build jobs passed."
