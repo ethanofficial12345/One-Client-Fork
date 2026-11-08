@@ -165,13 +165,12 @@ jobs:
             echo "dir=target/release" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: (Linux) Build RPM
+      - name: (Linux) Install cargo-generate-rpm
         if: matrix.platform == 'ubuntu-22.04'
         uses: ./.github/actions/install-cargo-tool
         with:
           tool: cargo-generate-rpm
           version: 0.21.0
-        shell: bash
 
       - name: (Linux) Build RPM artifact
         if: matrix.platform == 'ubuntu-22.04'
