@@ -66,7 +66,7 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@v4
 
       - name: Filter by input platform
         shell: bash
@@ -183,7 +183,7 @@ jobs:
           cp target/generate-rpm/*.rpm "${{ steps.outdir.outputs.dir }}/"
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@b4b15b8c7c6f2b116be8ecae6266530fa644de6c # v4
+        uses: actions/upload-artifact@v4
         with:
           name: oneclient-build-local-${{ matrix.os_key }}-${{ matrix.arch }}
           path: |
