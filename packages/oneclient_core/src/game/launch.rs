@@ -450,6 +450,7 @@ async fn start(
         version.type_,
         profile.resolution.unwrap_or_default(),
         &java.os_arch,
+        account.is_offline(),
     )?;
     arguments::append_profile_game_arguments(
         &mut mc_args,

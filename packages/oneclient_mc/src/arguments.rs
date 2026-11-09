@@ -168,6 +168,10 @@ fn split_custom_args(raw: &str) -> Vec<String> {
     args
 }
 
+/// Vanilla checks the access token is present but does not validate it for
+/// offline identities; the session server request is what rejects an empty one
+const OFFLINE_ACCESS_TOKEN: &str = "0";
+
 #[allow(clippy::too_many_arguments)]
 pub fn minecraft_arguments(
     args: Option<&[Argument]>,
@@ -182,6 +186,7 @@ pub fn minecraft_arguments(
     version_type: VersionType,
     resolution: Resolution,
     java_arch: &str,
+    offline: bool,
 ) -> McResult<Vec<String>> {
     let mut parsed = Vec::new();
 
@@ -200,6 +205,7 @@ pub fn minecraft_arguments(
                 assets_directory,
                 version_type,
                 resolution,
+                offline,
             )?);
         }
     }
@@ -220,6 +226,7 @@ pub fn minecraft_arguments(
                     assets_directory,
                     version_type,
                     resolution,
+                    offline,
                 )
             },
             java_arch,
@@ -366,11 +373,21 @@ pub fn parse_minecraft_argument(
     assets_directory: &Path,
     version_type: VersionType,
     resolution: Resolution,
+    offline: bool,
 ) -> McResult<String> {
+    // Offline launches must not rely on the stored token being empty: the
+    // store keeps it empty but the game still needs a non-empty value
+    let token = if offline {
+        OFFLINE_ACCESS_TOKEN
+    } else {
+        access_token
+    };
+    let user_type = if offline { "legacy" } else { "msa" };
+
     Ok(argument
-        .replace("${accessToken}", access_token)
-        .replace("${auth_access_token}", access_token)
-        .replace("${auth_session}", access_token)
+        .replace("${accessToken}", token)
+        .replace("${auth_access_token}", token)
+        .replace("${auth_session}", token)
         .replace("${auth_player_name}", username)
         .replace("${auth_xuid}", "0")
         .replace("${auth_uuid}", &uuid.simple().to_string())
@@ -380,7 +397,7 @@ pub fn parse_minecraft_argument(
             oneclient_common::constants::MICROSOFT_CLIENT_ID,
         )
         .replace("${user_properties}", "{}")
-        .replace("${user_type}", "msa")
+        .replace("${user_type}", user_type)
         .replace("${version_name}", version)
         .replace("${assets_index_name}", asset_index)
         .replace(
@@ -1116,6 +1133,7 @@ mod tests {
             interfrost::api::minecraft::VersionType::Release,
             Resolution::default(),
             "arm64",
+            false,
         )
         .unwrap();
 
@@ -1148,12 +1166,91 @@ mod tests {
             interfrost::api::minecraft::VersionType::Release,
             Resolution::default(),
             "arm64",
+            false,
         )
         .unwrap();
 
         assert_eq!(args.iter().filter(|a| *a == "--gameDir").count(), 1);
         assert_eq!(args.iter().filter(|a| *a == "--username").count(), 1);
         assert_eq!(args.iter().filter(|a| *a == "--tweakClass").count(), 1);
+    }
+
+    fn value_of<'a>(args: &'a [String], flag: &str) -> &'a str {
+        let index = args
+            .iter()
+            .position(|arg| arg == flag)
+            .unwrap_or_else(|| panic!("missing {flag}"));
+        &args[index + 1]
+    }
+
+    fn offline_game_args() -> Vec<interfrost::api::minecraft::Argument> {
+        serde_json::from_str(
+            r#"["--username", "${auth_player_name}", "--uuid", "${auth_uuid}",
+                "--accessToken", "${auth_session}", "--userType", "${user_type}",
+                "--xuid", "${auth_xuid}", "--userProperties", "${user_properties}"]"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn offline_arguments_use_legacy_type_and_a_non_empty_token() {
+        let dir = std::env::temp_dir();
+        let game_args = offline_game_args();
+        let uuid = uuid::Uuid::parse_str("097d3392-865a-3f3c-8b4a-da1c3473466c").unwrap();
+
+        let args = minecraft_arguments(
+            Some(&game_args),
+            None,
+            "",
+            "TestUser",
+            uuid,
+            "1.20.4",
+            "17",
+            &dir,
+            &dir,
+            interfrost::api::minecraft::VersionType::Release,
+            Resolution::default(),
+            "amd64",
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(value_of(&args, "--userType"), "legacy");
+        assert_eq!(value_of(&args, "--accessToken"), "0");
+        assert!(!value_of(&args, "--accessToken").is_empty());
+        assert_eq!(value_of(&args, "--xuid"), "0");
+        assert_eq!(
+            value_of(&args, "--uuid"),
+            "097d3392865a3f3c8b4ada1c3473466c"
+        );
+        assert_eq!(value_of(&args, "--username"), "TestUser");
+    }
+
+    #[test]
+    fn microsoft_arguments_still_use_msa_and_the_real_token() {
+        let dir = std::env::temp_dir();
+        let game_args = offline_game_args();
+        let uuid = uuid::Uuid::new_v4();
+
+        let args = minecraft_arguments(
+            Some(&game_args),
+            None,
+            "real-token",
+            "TestUser",
+            uuid,
+            "1.20.4",
+            "17",
+            &dir,
+            &dir,
+            interfrost::api::minecraft::VersionType::Release,
+            Resolution::default(),
+            "amd64",
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(value_of(&args, "--userType"), "msa");
+        assert_eq!(value_of(&args, "--accessToken"), "real-token");
     }
 
     #[test]

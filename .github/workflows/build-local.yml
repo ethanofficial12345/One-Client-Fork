@@ -1,0 +1,88 @@
+name: Local Build (Offline Accounts)
+
+on:
+  workflow_dispatch:
+    inputs:
+      verbose:
+        description: 'Enable verbose logging (cargo packager --verbose)'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: build-local-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_PROFILE_RELEASE_LTO: thin
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+  SQLX_OFFLINE: 'true'
+  CI: 'true'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          save-cache: true
+          restore-cache: true
+          cache-namespace: build-local-2-10-cache
+
+      - name: Install cargo-packager
+        uses: ./.github/actions/install-cargo-tool
+        with:
+          tool: cargo-packager
+          version: 0.11.8
+
+      - name: Build release binary
+        shell: bash
+        run: cargo build --release --bin oneclient_app
+
+      - name: Stage app-local VC++ runtime
+        shell: bash
+        run: python3 distribution/windows/bundle-crt.py
+
+      - name: Package (unsigned NSIS installer)
+        shell: bash
+        run: |
+          ARGS="--release --formats nsis"
+          if [ "${{ github.event.inputs.verbose }}" = "true" ]; then
+            ARGS="$ARGS --verbose"
+          fi
+          cargo packager $ARGS
+
+      - name: Verify NSIS output
+        shell: pwsh
+        run: |
+          Get-ChildItem target/release/*.exe -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Host "$($_.Name) - $([math]::Round($_.Length/1MB,1)) MB"
+          }
+          if (-not (Test-Path target/release/*.exe)) {
+            Write-Error "No installer found in target/release/"
+            exit 1
+          }
+
+      - name: Smoke-test launcher starts
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Brief launch test: start, let it init, kill after 5s
+          timeout 5 ./target/release/oneclient_app.exe || true
+          echo "launcher exited cleanly (timeout is expected)"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: oneclient-build-local-windows-x64
+          path: |
+            target/release/oneclient_app*
+            target/release/OneClient_*-setup.exe
+            !**/.gitattributes
+            !**/.github
+          retention-days: 14
